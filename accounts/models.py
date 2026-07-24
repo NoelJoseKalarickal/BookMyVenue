@@ -28,11 +28,3 @@ class VenueOwner(models.Model):
     def __str__(self):
         return self.name
 
-class EmailOTP(models.Model):
-    email = models.EmailField()
-    otp = models.CharField(max_length=6)
-    created_at = models.DateTimeField(default=timezone.now)
-    expires_at = models.DateTimeField()
-
-    def __str__(self):
-        return self.email

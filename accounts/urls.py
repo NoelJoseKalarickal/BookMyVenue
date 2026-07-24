@@ -1,5 +1,9 @@
 from django.urls import path
-from .views import CustomerRegistrationView, VenueOwnerRegistrationView
+from .views import (
+    CustomerRegistrationView,
+    VenueOwnerRegistrationView,
+    OTPVerificationView,
+)
 
 urlpatterns = [
     path(
@@ -11,5 +15,10 @@ urlpatterns = [
         "register/owner/",
         VenueOwnerRegistrationView.as_view(),
         name="owner-register",
+    ),
+    path(
+        "verify-otp/",
+        OTPVerificationView.as_view(),
+        name="verify-otp",
     ),
 ]
