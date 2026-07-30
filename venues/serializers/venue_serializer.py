@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Venue
+from venues.models import Venue
 
 
 class VenueSerializer(serializers.ModelSerializer):

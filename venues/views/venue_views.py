@@ -3,9 +3,10 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
+
 from accounts.models import VenueOwner
 
-from .serializers import VenueSerializer
+from venues.serializers import VenueSerializer
 
 
 class AddVenueView(APIView):
