@@ -1,10 +1,19 @@
+import nested_admin
+
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import EventType, Venue, VenueImage
+from .models import (
+    EventType,
+    Venue,
+    VenueImage,
+    WeeklySchedule,
+    WeeklyTimeSlot,
+    AvailabilityOverride,
+)
 
 
-class VenueImageInline(admin.TabularInline):
+class VenueImageInline(nested_admin.NestedTabularInline):
     model = VenueImage
     extra = 1
 
@@ -21,7 +30,8 @@ class VenueImageInline(admin.TabularInline):
     def preview(self, obj):
         if obj.image:
             return format_html(
-                '<img src="{}" width="150" height="100" style="object-fit:cover;border-radius:8px;" />',
+                '<img src="{}" width="150" height="100" '
+                'style="object-fit:cover;border-radius:8px;" />',
                 obj.image.url,
             )
         return "No Image"
@@ -29,8 +39,53 @@ class VenueImageInline(admin.TabularInline):
     preview.short_description = "Preview"
 
 
+class WeeklyTimeSlotInline(nested_admin.NestedTabularInline):
+    model = WeeklyTimeSlot
+    extra = 1
+
+    fields = (
+        "start_time",
+        "end_time",
+        "minimum_booking_duration_minutes",
+        "slot_duration_minutes",
+        "buffer_time_minutes",
+    )
+
+
+class WeeklyScheduleInline(nested_admin.NestedStackedInline):
+    model = WeeklySchedule
+    extra = 1
+
+    fields = (
+        "day_of_week",
+        "status",
+    )
+
+    inlines = [
+        WeeklyTimeSlotInline,
+    ]
+
+
+class AvailabilityOverrideInline(
+    nested_admin.NestedTabularInline
+):
+    model = AvailabilityOverride
+    extra = 1
+
+    fields = (
+        "date",
+        "status",
+        "start_time",
+        "end_time",
+        "minimum_booking_duration_minutes",
+        "slot_duration_minutes",
+        "buffer_time_minutes",
+    )
+
+
 @admin.register(EventType)
 class EventTypeAdmin(admin.ModelAdmin):
+
     list_display = (
         "id",
         "name",
@@ -42,7 +97,8 @@ class EventTypeAdmin(admin.ModelAdmin):
 
 
 @admin.register(Venue)
-class VenueAdmin(admin.ModelAdmin):
+class VenueAdmin(nested_admin.NestedModelAdmin):
+
     list_display = (
         "id",
         "venue_name",
@@ -69,4 +125,6 @@ class VenueAdmin(admin.ModelAdmin):
 
     inlines = [
         VenueImageInline,
+        WeeklyScheduleInline,
+        AvailabilityOverrideInline,
     ]

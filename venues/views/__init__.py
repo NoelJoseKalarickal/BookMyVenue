@@ -5,3 +5,10 @@ from .venue_detail_view import VenueDetailView
 from .upload_venue_image_view import UploadVenueImageView
 from .set_primary_image_view import SetPrimaryImageView
 from .delete_venue_image_view import DeleteVenueImageView
+from .add_weekly_schedule_view import AddWeeklyScheduleView
+from .weekly_schedule_views import WeeklyScheduleView
+from .edit_weekly_schedule_view import EditWeeklyScheduleView
+from .delete_weekly_time_slot_view import DeleteWeeklyTimeSlotView
+from .availability_override_views import AvailabilityOverrideView
+from .check_availability_view import CheckAvailabilityView
+from .available_slots_view import AvailableSlotsView
