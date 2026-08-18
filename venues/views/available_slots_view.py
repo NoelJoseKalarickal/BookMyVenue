@@ -13,6 +13,8 @@ from venues.models import (
     AvailabilityOverride,
 )
 
+from bookings.models import Booking
+
 
 class AvailableSlotsView(APIView):
 
@@ -26,28 +28,22 @@ class AvailableSlotsView(APIView):
 
         if venue is None:
             return Response(
-                {
-                    "message": "Venue not found."
-                },
+                {"message": "Venue not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        date_string = request.query_params.get(
-            "date"
-        )
+        date_string = request.query_params.get("date")
 
         if not date_string:
             return Response(
-                {
-                    "message": "date is required."
-                },
+                {"message": "date is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
         try:
             requested_date = datetime.strptime(
                 date_string,
-                "%Y-%m-%d"
+                "%Y-%m-%d",
             ).date()
 
         except ValueError:
@@ -62,80 +58,25 @@ class AvailableSlotsView(APIView):
 
         if requested_date < today:
             return Response(
-                {
-                    "message": "Past dates cannot be selected."
-                },
+                {"message": "Past dates cannot be selected."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # =================================================
-        # SPECIAL DATE OVERRIDE
-        # =================================================
+        # -----------------------------------------
+        # GET AVAILABILITY PERIODS
+        # -----------------------------------------
 
-        override = AvailabilityOverride.objects.filter(
-            venue=venue,
-            date=requested_date,
-        ).first()
+        periods = self.get_periods(
+            venue,
+            requested_date,
+        )
 
-        if override:
-
-            if override.status == "CLOSED":
-
-                return Response(
-                    {
-                        "venue": venue.venue_name,
-                        "date": requested_date,
-                        "slot_duration_minutes": None,
-                        "minimum_booking_duration_minutes": None,
-                        "slots": [],
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            generated = self.generate_slots(
-                requested_date,
-                override.start_time,
-                override.end_time,
-                override.slot_duration_minutes,
-                override.minimum_booking_duration_minutes,
-                override.buffer_time_minutes,
-            )
+        if periods is None:
 
             return Response(
                 {
                     "venue": venue.venue_name,
                     "date": requested_date,
-                    "slot_duration_minutes":
-                        override.slot_duration_minutes,
-                    "minimum_booking_duration_minutes":
-                        override.minimum_booking_duration_minutes,
-                    "slots": generated,
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        # =================================================
-        # WEEKLY SCHEDULE
-        # =================================================
-
-        day_name = requested_date.strftime(
-            "%A"
-        ).upper()
-
-        schedule = WeeklySchedule.objects.filter(
-            venue=venue,
-            day_of_week=day_name,
-            status="AVAILABLE",
-        ).first()
-
-        if schedule is None:
-
-            return Response(
-                {
-                    "venue": venue.venue_name,
-                    "date": requested_date,
-                    "slot_duration_minutes": None,
-                    "minimum_booking_duration_minutes": None,
                     "slots": [],
                 },
                 status=status.HTTP_200_OK,
@@ -143,41 +84,108 @@ class AvailableSlotsView(APIView):
 
         all_slots = []
 
-        for time_slot in schedule.time_slots.all():
+        for period in periods:
 
             generated = self.generate_slots(
                 requested_date,
-                time_slot.start_time,
-                time_slot.end_time,
-                time_slot.slot_duration_minutes,
-                time_slot.minimum_booking_duration_minutes,
-                time_slot.buffer_time_minutes,
+                period["start_time"],
+                period["end_time"],
+                period["slot_duration"],
+                period["minimum_duration"],
+                period["buffer"],
             )
 
             all_slots.extend(generated)
-
-        # =================================================
-        # SORT ALL PERIODS
-        # =================================================
 
         all_slots.sort(
             key=lambda slot: slot["start_time"]
         )
 
+        # -----------------------------------------
+        # ADD BOOKING STATUS
+        # -----------------------------------------
+
+        bookings = Booking.objects.filter(
+            venue=venue,
+            booking_date=requested_date,
+            status__in=[
+                "HELD",
+                "CONFIRMED",
+            ],
+        )
+
+        now = timezone.localtime()
+
+        for slot in all_slots:
+
+            slot_start = datetime.strptime(
+                slot["start_time"],
+                "%H:%M:%S",
+            ).time()
+
+            slot_end = datetime.strptime(
+                slot["end_time"],
+                "%H:%M:%S",
+            ).time()
+
+            # BOOKED / HELD takes priority
+            for booking in bookings:
+
+                if (
+                    booking.start_time < slot_end
+                    and booking.end_time > slot_start
+                ):
+
+                    if booking.status == "HELD":
+
+                        # Hold expired
+                        if (
+                            booking.hold_expires_at
+                            and booking.hold_expires_at
+                            <= timezone.now()
+                        ):
+                            continue
+
+                        slot["status"] = "HELD"
+                        slot["bookable"] = False
+
+                    elif booking.status == "CONFIRMED":
+
+                        slot["status"] = "BOOKED"
+                        slot["bookable"] = False
+
+                    break
+
+            # -------------------------------------
+            # EXPIRED
+            # -------------------------------------
+
+            if (
+                slot["status"] == "AVAILABLE"
+                and requested_date == now.date()
+            ):
+
+                if slot_end <= now.time():
+
+                    slot["status"] = "EXPIRED"
+                    slot["bookable"] = False
+
+        # -----------------------------------------
+        # RESPONSE
+        # -----------------------------------------
+
         slot_duration = None
         minimum_duration = None
 
-        if schedule.time_slots.exists():
+        if periods:
 
-            first_slot = schedule.time_slots.first()
+            slot_duration = periods[0][
+                "slot_duration"
+            ]
 
-            slot_duration = (
-                first_slot.slot_duration_minutes
-            )
-
-            minimum_duration = (
-                first_slot.minimum_booking_duration_minutes
-            )
+            minimum_duration = periods[0][
+                "minimum_duration"
+            ]
 
         return Response(
             {
@@ -191,9 +199,74 @@ class AvailableSlotsView(APIView):
             status=status.HTTP_200_OK,
         )
 
-    # =====================================================
-    # SLOT GENERATION
-    # =====================================================
+    # =================================================
+    # GET PERIODS
+    # =================================================
+
+    def get_periods(
+        self,
+        venue,
+        requested_date,
+    ):
+
+        override = AvailabilityOverride.objects.filter(
+            venue=venue,
+            date=requested_date,
+        ).first()
+
+        if override:
+
+            if override.status == "CLOSED":
+                return None
+
+            return [
+                {
+                    "start_time": override.start_time,
+                    "end_time": override.end_time,
+                    "slot_duration":
+                        override.slot_duration_minutes,
+                    "minimum_duration":
+                        override.minimum_booking_duration_minutes,
+                    "buffer":
+                        override.buffer_time_minutes,
+                }
+            ]
+
+        day_name = requested_date.strftime(
+            "%A"
+        ).upper()
+
+        schedule = WeeklySchedule.objects.filter(
+            venue=venue,
+            day_of_week=day_name,
+            status="AVAILABLE",
+        ).first()
+
+        if schedule is None:
+            return None
+
+        periods = []
+
+        for slot in schedule.time_slots.all():
+
+            periods.append(
+                {
+                    "start_time": slot.start_time,
+                    "end_time": slot.end_time,
+                    "slot_duration":
+                        slot.slot_duration_minutes,
+                    "minimum_duration":
+                        slot.minimum_booking_duration_minutes,
+                    "buffer":
+                        slot.buffer_time_minutes,
+                }
+            )
+
+        return periods
+
+    # =================================================
+    # GENERATE SLOTS
+    # =================================================
 
     def generate_slots(
         self,
@@ -201,13 +274,13 @@ class AvailableSlotsView(APIView):
         start_time,
         end_time,
         slot_duration,
-        minimum_booking_duration,
-        buffer_time,
+        minimum_duration,
+        buffer,
     ):
 
         slots = []
 
-        period_start = datetime.combine(
+        current = datetime.combine(
             requested_date,
             start_time,
         )
@@ -221,61 +294,20 @@ class AvailableSlotsView(APIView):
             minutes=slot_duration
         )
 
-        current = period_start
-
-        now = timezone.localtime()
-
         while current + duration <= period_end:
 
             slot_end = current + duration
 
-            # ---------------------------------------------
-            # CHECK WHETHER MINIMUM BOOKING CAN FIT
-            # ---------------------------------------------
-
             minimum_end = (
                 current
                 + timedelta(
-                    minutes=minimum_booking_duration
+                    minutes=minimum_duration
                 )
             )
 
-            minimum_can_fit = (
+            can_book = (
                 minimum_end <= period_end
             )
-
-            # ---------------------------------------------
-            # EXPIRED
-            # ---------------------------------------------
-
-            if requested_date < now.date():
-
-                slot_status = "EXPIRED"
-                bookable = False
-
-            elif requested_date == now.date():
-
-                if slot_end <= now.replace(
-                    second=0,
-                    microsecond=0
-                ).replace(
-                    year=requested_date.year,
-                    month=requested_date.month,
-                    day=requested_date.day,
-                ):
-
-                    slot_status = "EXPIRED"
-                    bookable = False
-
-                else:
-
-                    slot_status = "AVAILABLE"
-                    bookable = minimum_can_fit
-
-            else:
-
-                slot_status = "AVAILABLE"
-                bookable = minimum_can_fit
 
             slots.append(
                 {
@@ -285,19 +317,19 @@ class AvailableSlotsView(APIView):
                     "end_time": slot_end.strftime(
                         "%H:%M:%S"
                     ),
-                    "status": slot_status,
-                    "bookable": bookable,
+                    "status": (
+                        "AVAILABLE"
+                        if can_book
+                        else "UNAVAILABLE"
+                    ),
+                    "bookable": can_book,
                 }
             )
-
-            # ---------------------------------------------
-            # BUFFER ONLY BETWEEN POSSIBLE START SLOTS
-            # ---------------------------------------------
 
             current = (
                 slot_end
                 + timedelta(
-                    minutes=buffer_time
+                    minutes=buffer
                 )
             )
 

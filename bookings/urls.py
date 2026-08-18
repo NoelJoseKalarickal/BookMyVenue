@@ -4,11 +4,11 @@ from .views import (
     CreateBookingView,
     ConfirmBookingView,
     CancelBookingView,
+    ProcessExpiredBookingsView,
 )
 
 
 urlpatterns = [
-
     path(
         "create/",
         CreateBookingView.as_view(),
@@ -27,4 +27,9 @@ urlpatterns = [
         name="cancel-booking",
     ),
 
+    path(
+        "process-expired/",
+        ProcessExpiredBookingsView.as_view(),
+        name="process-expired-bookings",
+    ),
 ]

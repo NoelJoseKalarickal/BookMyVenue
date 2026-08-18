@@ -16,19 +16,23 @@ class BookingAdmin(admin.ModelAdmin):
         "status",
         "queue_position",
         "payment_status",
+        "total_amount",
         "hold_expires_at",
-    )
-
-    search_fields = (
-        "booking_id",
-        "user__username",
-        "venue__venue_name",
+        "created_at",
     )
 
     list_filter = (
         "status",
         "payment_status",
         "booking_date",
+        "venue",
+    )
+
+    search_fields = (
+        "booking_id",
+        "user__username",
+        "user__email",
+        "venue__venue_name",
     )
 
     ordering = (

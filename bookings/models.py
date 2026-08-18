@@ -70,6 +70,16 @@ class Booking(models.Model):
         default="PENDING",
     )
 
+    # Amount calculated when the booking is created.
+    # This preserves the price of the booking even if
+    # the venue's price changes later.
+    total_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
     created_at = models.DateTimeField(
         auto_now_add=True,
     )

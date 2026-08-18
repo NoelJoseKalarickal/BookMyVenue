@@ -18,6 +18,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "queue_position",
             "hold_expires_at",
             "payment_status",
+            "total_amount",
             "created_at",
             "updated_at",
         ]
@@ -29,6 +30,7 @@ class BookingSerializer(serializers.ModelSerializer):
             "queue_position",
             "hold_expires_at",
             "payment_status",
+            "total_amount",
             "created_at",
             "updated_at",
         ]
