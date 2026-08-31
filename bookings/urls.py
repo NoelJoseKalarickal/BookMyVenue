@@ -5,14 +5,29 @@ from .views import (
     ConfirmBookingView,
     CancelBookingView,
     ProcessExpiredBookingsView,
+    BookingDetailView,
+    MyBookingsView,
 )
 
 
 urlpatterns = [
+
     path(
         "create/",
         CreateBookingView.as_view(),
         name="create-booking",
+    ),
+
+    path(
+        "my/",
+        MyBookingsView.as_view(),
+        name="my-bookings",
+    ),
+
+    path(
+        "<uuid:booking_id>/",
+        BookingDetailView.as_view(),
+        name="booking-detail",
     ),
 
     path(

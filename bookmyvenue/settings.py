@@ -12,24 +12,31 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 from pathlib import Path
 from datetime import timedelta
+import os
+
+from dotenv import load_dotenv
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables from .env
+load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-239a2h(yi97&(69hqqyvm&2hbuynr+p(+vv2412xd==e%v2cg7'
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
 ALLOWED_HOSTS = []
 
 
-# Application definition
+# ---------------------------------------------------------
+# APPLICATIONS
+# ---------------------------------------------------------
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -38,7 +45,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+
     'rest_framework',
+
     'accounts',
     'venues',
     'bookings',
@@ -46,8 +55,14 @@ INSTALLED_APPS = [
     'reviews',
     'maintenance',
     'audit',
+
     "nested_admin",
 ]
+
+
+# ---------------------------------------------------------
+# MIDDLEWARE
+# ---------------------------------------------------------
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -59,7 +74,13 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+
 ROOT_URLCONF = 'bookmyvenue.urls'
+
+
+# ---------------------------------------------------------
+# TEMPLATES
+# ---------------------------------------------------------
 
 TEMPLATES = [
     {
@@ -76,11 +97,13 @@ TEMPLATES = [
     },
 ]
 
+
 WSGI_APPLICATION = 'bookmyvenue.wsgi.application'
 
 
-# Database
-# https://docs.djangoproject.com/en/6.0/ref/settings/#databases
+# ---------------------------------------------------------
+# DATABASE
+# ---------------------------------------------------------
 
 DATABASES = {
     'default': {
@@ -90,8 +113,9 @@ DATABASES = {
 }
 
 
-# Password validation
-# https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
+# ---------------------------------------------------------
+# PASSWORD VALIDATION
+# ---------------------------------------------------------
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -109,8 +133,9 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
-# Internationalization
-# https://docs.djangoproject.com/en/6.0/topics/i18n/
+# ---------------------------------------------------------
+# INTERNATIONALIZATION
+# ---------------------------------------------------------
 
 LANGUAGE_CODE = 'en-us'
 
@@ -121,10 +146,16 @@ USE_I18N = True
 USE_TZ = True
 
 
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/6.0/howto/static-files/
+# ---------------------------------------------------------
+# STATIC FILES
+# ---------------------------------------------------------
 
 STATIC_URL = 'static/'
+
+
+# ---------------------------------------------------------
+# CACHE
+# ---------------------------------------------------------
 
 CACHES = {
     "default": {
@@ -132,6 +163,11 @@ CACHES = {
         "LOCATION": "bookmyvenue-cache",
     }
 }
+
+
+# ---------------------------------------------------------
+# EMAIL
+# ---------------------------------------------------------
 
 EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
 
@@ -144,15 +180,42 @@ EMAIL_HOST_PASSWORD = "hget gpvi uxjq veas"
 
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
+# ---------------------------------------------------------
+# RAZORPAY
+# ---------------------------------------------------------
+
+RAZORPAY_KEY_ID = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET = os.getenv("RAZORPAY_KEY_SECRET", "")
+
+
+# ---------------------------------------------------------
+# DJANGO REST FRAMEWORK
+# ---------------------------------------------------------
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": (
         "rest_framework_simplejwt.authentication.JWTAuthentication",
     ),
 }
+
+
+# ---------------------------------------------------------
+# JWT
+# ---------------------------------------------------------
+
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
     "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": False,
+}
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+
+CELERY_BEAT_SCHEDULE = {
+    "process-expired-bookings-every-minute": {
+        "task": "bookings.tasks.process_expired_bookings",
+        "schedule": 60.0,
+    },
 }

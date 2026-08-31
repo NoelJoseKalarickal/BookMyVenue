@@ -9,6 +9,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
+from payments.views import RefundPaymentView
+
 from venues.models import (
     Venue,
     WeeklySchedule,
@@ -86,7 +88,8 @@ class CreateBookingView(APIView):
         if requested_start >= requested_end:
             return Response(
                 {
-                    "message": "Start time must be before end time."
+                    "message":
+                        "Start time must be before end time."
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
@@ -113,7 +116,6 @@ class CreateBookingView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Process expired holds for this exact requested period.
         self.expire_holds(
             venue,
             requested_date,
@@ -180,9 +182,9 @@ class CreateBookingView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # -------------------------------------------------
-        # SAME USER DUPLICATE / OVERLAPPING BOOKING
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # SAME USER OVERLAPPING BOOKING
+        # ---------------------------------------------
 
         own_conflict = Booking.objects.select_for_update().filter(
             user=request.user,
@@ -204,17 +206,17 @@ class CreateBookingView(APIView):
                         "You already have an active booking "
                         "or queue entry for an overlapping time."
                     ),
-                    "booking_id": str(
-                        own_conflict.booking_id
-                    ),
-                    "status": own_conflict.status,
+                    "booking_id":
+                        str(own_conflict.booking_id),
+                    "status":
+                        own_conflict.status,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # -------------------------------------------------
-        # BUFFER + BOOKING CONFLICT CHECK
-        # -------------------------------------------------
+        # ---------------------------------------------
+        # CONFLICT + FCFS QUEUE
+        # ---------------------------------------------
 
         conflict = self.find_conflict(
             request.user,
@@ -231,7 +233,6 @@ class CreateBookingView(APIView):
                 venue=venue,
                 booking_date=requested_date,
                 status="WAITING",
-            ).filter(
                 start_time__lt=requested_end,
                 end_time__gt=requested_start,
             ).count()
@@ -254,19 +255,19 @@ class CreateBookingView(APIView):
                         "with an active booking. "
                         "You have been added to the FCFS queue."
                     ),
-                    "booking_id": str(
-                        booking.booking_id
-                    ),
-                    "status": booking.status,
+                    "booking_id":
+                        str(booking.booking_id),
+                    "status":
+                        booking.status,
                     "queue_position":
                         booking.queue_position,
                 },
                 status=status.HTTP_201_CREATED,
             )
 
-        # -------------------------------------------------
+        # ---------------------------------------------
         # FIRST USER GETS 5-MINUTE HOLD
-        # -------------------------------------------------
+        # ---------------------------------------------
 
         hold_expires = (
             timezone.now()
@@ -295,13 +296,13 @@ class CreateBookingView(APIView):
             {
                 "message": (
                     "Slot held for 5 minutes. "
-                    "You can retry payment any number "
-                    "of times within this window."
+                    "Create a Razorpay payment order "
+                    "using this booking ID."
                 ),
-                "booking_id": str(
-                    booking.booking_id
-                ),
-                "status": booking.status,
+                "booking_id":
+                    str(booking.booking_id),
+                "status":
+                    booking.status,
                 "queue_position":
                     booking.queue_position,
                 "hold_expires_at":
@@ -312,9 +313,9 @@ class CreateBookingView(APIView):
             status=status.HTTP_201_CREATED,
         )
 
-    # =====================================================
+    # =============================================
     # AVAILABILITY
-    # =====================================================
+    # =============================================
 
     def get_availability(
         self,
@@ -386,13 +387,15 @@ class CreateBookingView(APIView):
         return {
             "minimum_duration":
                 minimum_duration or 60,
-            "buffer": buffer,
-            "slots": slots,
+            "buffer":
+                buffer,
+            "slots":
+                slots,
         }
 
-    # =====================================================
-    # CHECK PERIOD IS WITHIN AVAILABILITY
-    # =====================================================
+    # =============================================
+    # AVAILABILITY CHECK
+    # =============================================
 
     def time_is_available(
         self,
@@ -411,9 +414,9 @@ class CreateBookingView(APIView):
 
         return False
 
-    # =====================================================
-    # FIND BOOKING CONFLICT
-    # =====================================================
+    # =============================================
+    # CONFLICT CHECK
+    # =============================================
 
     def find_conflict(
         self,
@@ -456,8 +459,7 @@ class CreateBookingView(APIView):
                 booking.end_time,
             )
 
-            # Same user can have consecutive bookings
-            # without a buffer.
+            # Same user can book consecutive periods.
             if booking.user_id == user.id:
 
                 if (
@@ -470,7 +472,7 @@ class CreateBookingView(APIView):
 
                 continue
 
-            # Different users require buffer.
+            # Different users require the configured buffer.
             existing_start_with_buffer = (
                 existing_start_dt
                 - timedelta(minutes=buffer_minutes)
@@ -491,9 +493,9 @@ class CreateBookingView(APIView):
 
         return None
 
-    # =====================================================
+    # =============================================
     # EXPIRE HOLDS
-    # =====================================================
+    # =============================================
 
     def expire_holds(
         self,
@@ -508,7 +510,6 @@ class CreateBookingView(APIView):
             booking_date=booking_date,
             status="HELD",
             hold_expires_at__lte=timezone.now(),
-        ).filter(
             start_time__lt=end_time,
             end_time__gt=start_time,
         )
@@ -528,9 +529,9 @@ class CreateBookingView(APIView):
                 booking.end_time,
             )
 
-    # =====================================================
-    # PROMOTE NEXT FCFS USER
-    # =====================================================
+    # =============================================
+    # PROMOTE NEXT WAITING USER
+    # =============================================
 
     def promote_next_waiting(
         self,
@@ -592,138 +593,19 @@ class ConfirmBookingView(APIView):
 
     permission_classes = [IsAuthenticated]
 
-    @transaction.atomic
     def post(self, request, booking_id):
-
-        booking = Booking.objects.select_for_update().filter(
-            booking_id=booking_id,
-            user=request.user,
-        ).first()
-
-        if booking is None:
-            return Response(
-                {"message": "Booking not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Same 5-minute window is used for all payment attempts.
-        if booking.status != "HELD":
-            return Response(
-                {
-                    "message": (
-                        "This booking is no longer "
-                        "available for payment."
-                    ),
-                    "status": booking.status,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Late payment is rejected.
-        if (
-            booking.hold_expires_at is None
-            or booking.hold_expires_at <= timezone.now()
-        ):
-
-            booking.status = "EXPIRED"
-            booking.payment_status = "FAILED"
-            booking.hold_expires_at = None
-            booking.save()
-
-            self.promote_next_waiting(
-                booking
-            )
-
-            return Response(
-                {
-                    "message": (
-                        "The 5-minute booking window "
-                        "has expired. Payment cannot "
-                        "confirm this booking."
-                    ),
-                    "status": "EXPIRED",
-                    "refund_required": True,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # In the real payment gateway, payment verification
-        # happens here. For now this endpoint represents
-        # a successful payment.
-        booking.payment_status = "SUCCESS"
-        booking.status = "CONFIRMED"
-        booking.hold_expires_at = None
-
-        booking.save()
-
-        self.send_confirmation_email(
-            booking
-        )
 
         return Response(
             {
                 "message": (
-                    "Booking confirmed successfully."
+                    "Booking confirmation is handled "
+                    "automatically after successful "
+                    "Razorpay payment verification."
                 ),
-                "booking_id": str(
-                    booking.booking_id
-                ),
-                "status": booking.status,
-                "payment_status":
-                    booking.payment_status,
-                "total_amount":
-                    booking.total_amount,
+                "use_endpoint":
+                    f"/payments/verify/{booking_id}/",
             },
-            status=status.HTTP_200_OK,
-        )
-
-    def promote_next_waiting(self, booking):
-
-        next_booking = Booking.objects.select_for_update().filter(
-            venue=booking.venue,
-            booking_date=booking.booking_date,
-            status="WAITING",
-            start_time__lt=booking.end_time,
-            end_time__gt=booking.start_time,
-        ).order_by(
-            "created_at"
-        ).first()
-
-        if next_booking:
-
-            next_booking.status = "HELD"
-            next_booking.queue_position = 1
-            next_booking.hold_expires_at = (
-                timezone.now()
-                + timedelta(minutes=5)
-            )
-
-            next_booking.save()
-
-    def send_confirmation_email(
-        self,
-        booking,
-    ):
-
-        email = booking.user.email
-
-        if not email:
-            return
-
-        send_mail(
-            subject="BookMyVenue Booking Confirmation",
-            message=(
-                "Your booking has been confirmed.\n\n"
-                f"Booking ID: {booking.booking_id}\n"
-                f"Venue: {booking.venue.venue_name}\n"
-                f"Date: {booking.booking_date}\n"
-                f"Time: {booking.start_time} - "
-                f"{booking.end_time}\n"
-                f"Amount: {booking.total_amount}\n"
-            ),
-            from_email=None,
-            recipient_list=[email],
-            fail_silently=True,
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
@@ -753,27 +635,76 @@ class CancelBookingView(APIView):
                 {
                     "message": (
                         "Booking cannot be cancelled."
-                    )
+                    ),
+                    "status":
+                        booking.status,
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        was_held = booking.status == "HELD"
+        was_paid = (
+            booking.payment_status == "SUCCESS"
+        )
+
+        # ---------------------------------------------
+        # PAID BOOKING
+        # ---------------------------------------------
+
+        if was_paid:
+
+            refund_result = (
+                RefundPaymentView.process_refund(
+                    booking
+                )
+            )
+
+            if (
+                refund_result["status"]
+                != status.HTTP_200_OK
+            ):
+                return Response(
+                    refund_result["data"],
+                    status=refund_result["status"],
+                )
+
+        # ---------------------------------------------
+        # CANCEL
+        # ---------------------------------------------
 
         booking.status = "CANCELLED"
-
-        if booking.payment_status == "SUCCESS":
-            booking.payment_status = "REFUNDED"
-
         booking.hold_expires_at = None
+
+        if not was_paid:
+            booking.payment_status = "FAILED"
 
         booking.save()
 
-        # If a HELD user voluntarily cancels,
-        # the next FCFS user gets the slot.
-        if was_held:
+        # ---------------------------------------------
+        # PROMOTE NEXT FCFS USER
+        # ---------------------------------------------
 
-            next_booking = Booking.objects.select_for_update().filter(
+        next_booking = Booking.objects.select_for_update().filter(
+            venue=booking.venue,
+            booking_date=booking.booking_date,
+            status="WAITING",
+            start_time__lt=booking.end_time,
+            end_time__gt=booking.start_time,
+        ).order_by(
+            "created_at"
+        ).first()
+
+        if next_booking:
+
+            next_booking.status = "HELD"
+            next_booking.queue_position = 1
+            next_booking.hold_expires_at = (
+                timezone.now()
+                + timedelta(minutes=5)
+            )
+
+            next_booking.save()
+
+            waiting_bookings = Booking.objects.filter(
                 venue=booking.venue,
                 booking_date=booking.booking_date,
                 status="WAITING",
@@ -781,32 +712,100 @@ class CancelBookingView(APIView):
                 end_time__gt=booking.start_time,
             ).order_by(
                 "created_at"
-            ).first()
+            )
 
-            if next_booking:
+            position = 2
 
-                next_booking.status = "HELD"
-                next_booking.queue_position = 1
-                next_booking.hold_expires_at = (
-                    timezone.now()
-                    + timedelta(minutes=5)
+            for waiting_booking in waiting_bookings:
+
+                waiting_booking.queue_position = position
+
+                waiting_booking.save(
+                    update_fields=[
+                        "queue_position",
+                        "updated_at",
+                    ]
                 )
 
-                next_booking.save()
+                position += 1
+
+        # ---------------------------------------------
+        # CANCELLATION EMAIL
+        # ---------------------------------------------
+
+        self.send_cancellation_email(
+            booking,
+            was_paid,
+        )
 
         return Response(
             {
-                "message": (
-                    "Booking cancelled successfully."
-                ),
-                "booking_id": str(
-                    booking.booking_id
-                ),
-                "status": booking.status,
+                "message":
+                    "Booking cancelled successfully.",
+                "booking_id":
+                    str(booking.booking_id),
+                "status":
+                    booking.status,
                 "payment_status":
                     booking.payment_status,
+                "refund_processed":
+                    was_paid,
             },
             status=status.HTTP_200_OK,
+        )
+
+    def send_cancellation_email(
+        self,
+        booking,
+        was_paid,
+    ):
+
+        email = booking.user.email
+
+        if not email:
+            return
+
+        if was_paid:
+
+            subject = (
+                "BookMyVenue Booking Cancelled "
+                "and Refund Processed"
+            )
+
+            message = (
+                "Your BookMyVenue booking has been "
+                "cancelled successfully.\n\n"
+                f"Booking ID: {booking.booking_id}\n"
+                f"Venue: {booking.venue.venue_name}\n"
+                f"Date: {booking.booking_date}\n"
+                f"Time: {booking.start_time} - "
+                f"{booking.end_time}\n"
+                f"Refund Status: Processed\n"
+                f"Amount: {booking.total_amount}\n"
+            )
+
+        else:
+
+            subject = (
+                "BookMyVenue Booking Cancelled"
+            )
+
+            message = (
+                "Your BookMyVenue booking has been "
+                "cancelled successfully.\n\n"
+                f"Booking ID: {booking.booking_id}\n"
+                f"Venue: {booking.venue.venue_name}\n"
+                f"Date: {booking.booking_date}\n"
+                f"Time: {booking.start_time} - "
+                f"{booking.end_time}\n"
+            )
+
+        send_mail(
+            subject=subject,
+            message=message,
+            from_email=None,
+            recipient_list=[email],
+            fail_silently=True,
         )
 
 
@@ -855,23 +854,149 @@ class ProcessExpiredBookingsView(APIView):
 
                 next_booking.save()
 
+                waiting_bookings = Booking.objects.filter(
+                    venue=booking.venue,
+                    booking_date=booking.booking_date,
+                    status="WAITING",
+                    start_time__lt=booking.end_time,
+                    end_time__gt=booking.start_time,
+                ).order_by(
+                    "created_at"
+                )
+
+                position = 2
+
+                for waiting_booking in waiting_bookings:
+
+                    waiting_booking.queue_position = position
+
+                    waiting_booking.save(
+                        update_fields=[
+                            "queue_position",
+                            "updated_at",
+                        ]
+                    )
+
+                    position += 1
+
                 promoted.append(
                     {
-                        "expired_booking_id": str(
-                            booking.booking_id
-                        ),
-                        "new_held_booking_id": str(
-                            next_booking.booking_id
-                        ),
+                        "expired_booking_id":
+                            str(booking.booking_id),
+                        "new_held_booking_id":
+                            str(next_booking.booking_id),
                     }
                 )
 
         return Response(
             {
-                "message": (
-                    "Expired bookings processed."
-                ),
-                "promoted": promoted,
+                "message":
+                    "Expired bookings processed.",
+                "promoted":
+                    promoted,
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class BookingDetailView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, booking_id):
+
+        booking = Booking.objects.filter(
+            booking_id=booking_id,
+            user=request.user,
+        ).first()
+
+        if booking is None:
+            return Response(
+                {"message": "Booking not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(
+            {
+                "booking_id":
+                    str(booking.booking_id),
+                "venue":
+                    booking.venue.id,
+                "venue_name":
+                    booking.venue.venue_name,
+                "booking_date":
+                    booking.booking_date,
+                "start_time":
+                    booking.start_time,
+                "end_time":
+                    booking.end_time,
+                "status":
+                    booking.status,
+                "queue_position":
+                    booking.queue_position,
+                "hold_expires_at":
+                    booking.hold_expires_at,
+                "payment_status":
+                    booking.payment_status,
+                "total_amount":
+                    booking.total_amount,
+                "created_at":
+                    booking.created_at,
+                "updated_at":
+                    booking.updated_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class MyBookingsView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+
+        bookings = Booking.objects.filter(
+            user=request.user
+        ).order_by(
+            "-created_at"
+        )
+
+        data = []
+
+        for booking in bookings:
+
+            data.append(
+                {
+                    "booking_id":
+                        str(booking.booking_id),
+                    "venue":
+                        booking.venue.id,
+                    "venue_name":
+                        booking.venue.venue_name,
+                    "booking_date":
+                        booking.booking_date,
+                    "start_time":
+                        booking.start_time,
+                    "end_time":
+                        booking.end_time,
+                    "status":
+                        booking.status,
+                    "queue_position":
+                        booking.queue_position,
+                    "hold_expires_at":
+                        booking.hold_expires_at,
+                    "payment_status":
+                        booking.payment_status,
+                    "total_amount":
+                        booking.total_amount,
+                    "created_at":
+                        booking.created_at,
+                    "updated_at":
+                        booking.updated_at,
+                }
+            )
+
+        return Response(
+            data,
             status=status.HTTP_200_OK,
         )

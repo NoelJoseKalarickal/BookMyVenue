@@ -34,4 +34,8 @@ urlpatterns = [
     "api/bookings/",
     include("bookings.urls"),
 ),
+path(
+    "api/payments/",
+    include("payments.urls"),
+),
 ]
