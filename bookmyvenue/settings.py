@@ -55,7 +55,7 @@ INSTALLED_APPS = [
     'reviews',
     'maintenance',
     'audit',
-
+    
     "nested_admin",
 ]
 

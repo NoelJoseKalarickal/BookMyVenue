@@ -38,4 +38,16 @@ path(
     "api/payments/",
     include("payments.urls"),
 ),
+path(
+    "api/maintenance/",
+    include("maintenance.urls"),
+),
+path(
+    "api/reviews/",
+    include("reviews.urls")
+),
+path(
+    "api/audit/",
+    include("audit.urls")
+),
 ]

@@ -17,6 +17,12 @@ from venues.models import (
     AvailabilityOverride,
 )
 
+from maintenance.services import (
+    maintenance_blocks_booking,
+)
+
+from audit.services import create_audit_log
+
 from .models import Booking
 
 
@@ -116,12 +122,42 @@ class CreateBookingView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # ---------------------------------------------
+        # MAINTENANCE CHECK
+        # ---------------------------------------------
+
+        if maintenance_blocks_booking(
+            venue,
+            requested_date,
+            requested_start,
+            requested_end,
+        ):
+            return Response(
+                {
+                    "message": (
+                        "The venue is under maintenance "
+                        "during the requested period. "
+                        "Please select another time."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ---------------------------------------------
+        # EXPIRE HOLDS
+        # ---------------------------------------------
+
         self.expire_holds(
+            request,
             venue,
             requested_date,
             requested_start,
             requested_end,
         )
+
+        # ---------------------------------------------
+        # AVAILABILITY
+        # ---------------------------------------------
 
         availability = self.get_availability(
             venue,
@@ -248,6 +284,16 @@ class CreateBookingView(APIView):
                 payment_status="PENDING",
             )
 
+            create_audit_log(
+                request,
+                "BOOKING_CREATED",
+                (
+                    f"Booking {booking.booking_id} created "
+                    f"and added to the FCFS queue for "
+                    f"venue '{venue.venue_name}'."
+                ),
+            )
+
             return Response(
                 {
                     "message": (
@@ -290,6 +336,16 @@ class CreateBookingView(APIView):
             hold_expires_at=hold_expires,
             payment_status="PENDING",
             total_amount=total_amount,
+        )
+
+        create_audit_log(
+            request,
+            "BOOKING_CREATED",
+            (
+                f"Booking {booking.booking_id} created "
+                f"and a 5-minute hold was placed for "
+                f"venue '{venue.venue_name}'."
+            ),
         )
 
         return Response(
@@ -499,6 +555,7 @@ class CreateBookingView(APIView):
 
     def expire_holds(
         self,
+        request,
         venue,
         booking_date,
         start_time,
@@ -521,6 +578,15 @@ class CreateBookingView(APIView):
             booking.hold_expires_at = None
 
             booking.save()
+
+            create_audit_log(
+                request,
+                "UPDATE",
+                (
+                    f"Booking {booking.booking_id} expired "
+                    f"because its payment hold timed out."
+                ),
+            )
 
             self.promote_next_waiting(
                 venue,
@@ -679,6 +745,15 @@ class CancelBookingView(APIView):
 
         booking.save()
 
+        create_audit_log(
+            request,
+            "BOOKING_CANCELLED",
+            (
+                f"Booking {booking.booking_id} for venue "
+                f"'{booking.venue.venue_name}' was cancelled."
+            ),
+        )
+
         # ---------------------------------------------
         # PROMOTE NEXT FCFS USER
         # ---------------------------------------------
@@ -832,6 +907,15 @@ class ProcessExpiredBookingsView(APIView):
             booking.hold_expires_at = None
 
             booking.save()
+
+            create_audit_log(
+                request,
+                "UPDATE",
+                (
+                    f"Booking {booking.booking_id} expired "
+                    f"because its payment hold timed out."
+                ),
+            )
 
             next_booking = Booking.objects.select_for_update().filter(
                 venue=booking.venue,

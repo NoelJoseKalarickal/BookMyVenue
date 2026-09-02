@@ -11,9 +11,13 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 
 from bookings.models import Booking
+from accounts.models import VenueOwner
+
+from audit.services import create_audit_log
 
 from .models import Payment
 from .serializers import PaymentSerializer
+from payments.route_service import transfer_payment_to_owner
 
 
 class CreatePaymentOrderView(APIView):
@@ -76,7 +80,6 @@ class CreatePaymentOrderView(APIView):
             booking=booking,
         ).first()
 
-        # Reuse the same order during the same hold.
         if (
             existing_payment
             and existing_payment.razorpay_order_id
@@ -159,6 +162,16 @@ class CreatePaymentOrderView(APIView):
         payment.amount = booking.total_amount
         payment.status = "CREATED"
         payment.save()
+
+        create_audit_log(
+            request,
+            "CREATE",
+            (
+                f"Razorpay payment order created for "
+                f"booking {booking.booking_id}, "
+                f"amount ₹{booking.total_amount}."
+            ),
+        )
 
         return Response(
             {
@@ -291,7 +304,10 @@ class VerifyPaymentView(APIView):
             )
         )
 
-        # First verify the Razorpay signature.
+        # ---------------------------------------------
+        # VERIFY RAZORPAY SIGNATURE
+        # ---------------------------------------------
+
         try:
             client.utility.verify_payment_signature(
                 {
@@ -306,6 +322,7 @@ class VerifyPaymentView(APIView):
 
         except Exception:
             payment.status = "FAILED"
+
             payment.save(
                 update_fields=[
                     "status",
@@ -314,11 +331,21 @@ class VerifyPaymentView(APIView):
             )
 
             booking.payment_status = "FAILED"
+
             booking.save(
                 update_fields=[
                     "payment_status",
                     "updated_at",
                 ]
+            )
+
+            create_audit_log(
+                request,
+                "UPDATE",
+                (
+                    f"Payment verification failed for "
+                    f"booking {booking.booking_id}."
+                ),
             )
 
             return Response(
@@ -331,15 +358,20 @@ class VerifyPaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Check whether the original hold is still active.
+        # ---------------------------------------------
+        # CHECK WHETHER HOLD IS STILL ACTIVE
+        # ---------------------------------------------
+
         hold_active = (
             booking.status == "HELD"
             and booking.hold_expires_at is not None
             and booking.hold_expires_at > timezone.now()
         )
 
-        # If the hold has expired, payment may still have
-        # reached Razorpay. Check Razorpay before deciding.
+        # ---------------------------------------------
+        # HOLD EXPIRED
+        # ---------------------------------------------
+
         if not hold_active:
 
             try:
@@ -366,8 +398,6 @@ class VerifyPaymentView(APIView):
 
             if razorpay_payment_status == "captured":
 
-                # Money was actually received after the
-                # booking hold expired. Refund it.
                 try:
                     refund = client.payment.refund(
                         razorpay_payment_id,
@@ -397,9 +427,11 @@ class VerifyPaymentView(APIView):
                 payment.razorpay_payment_id = (
                     razorpay_payment_id
                 )
+
                 payment.razorpay_signature = (
                     razorpay_signature
                 )
+
                 payment.refund_id = refund["id"]
                 payment.status = "REFUNDED"
 
@@ -410,6 +442,16 @@ class VerifyPaymentView(APIView):
                 booking.hold_expires_at = None
 
                 booking.save()
+
+                create_audit_log(
+                    request,
+                    "PAYMENT_REFUND",
+                    (
+                        f"Payment for booking "
+                        f"{booking.booking_id} was refunded "
+                        f"because the booking hold expired."
+                    ),
+                )
 
                 return Response(
                     {
@@ -432,12 +474,15 @@ class VerifyPaymentView(APIView):
                 )
 
             payment.status = "FAILED"
+
             payment.razorpay_payment_id = (
                 razorpay_payment_id
             )
+
             payment.razorpay_signature = (
                 razorpay_signature
             )
+
             payment.save()
 
             booking.status = "EXPIRED"
@@ -445,6 +490,15 @@ class VerifyPaymentView(APIView):
             booking.hold_expires_at = None
 
             booking.save()
+
+            create_audit_log(
+                request,
+                "UPDATE",
+                (
+                    f"Payment failed for expired booking "
+                    f"{booking.booking_id}."
+                ),
+            )
 
             return Response(
                 {
@@ -463,7 +517,10 @@ class VerifyPaymentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Normal successful payment.
+        # ---------------------------------------------
+        # SUCCESSFUL PAYMENT
+        # ---------------------------------------------
+
         payment.razorpay_payment_id = (
             razorpay_payment_id
         )
@@ -473,28 +530,95 @@ class VerifyPaymentView(APIView):
         )
 
         payment.status = "SUCCESS"
+
         payment.save()
 
         booking.status = "CONFIRMED"
         booking.payment_status = "SUCCESS"
         booking.hold_expires_at = None
+
         booking.save()
+
+        create_audit_log(
+            request,
+            "PAYMENT_SUCCESS",
+            (
+                f"Payment of ₹{payment.amount} succeeded "
+                f"for booking {booking.booking_id}."
+            ),
+        )
+
+        # ---------------------------------------------
+        # TRANSFER PAYMENT TO VENUE OWNER
+        # ---------------------------------------------
+
+        owner = VenueOwner.objects.filter(
+            venues=booking.venue
+        ).first()
+
+        transfer_result = None
+        transfer_error = None
+
+        if owner:
+
+            if owner.razorpay_account_id:
+
+                try:
+                    transfer_result = (
+                        transfer_payment_to_owner(
+                            razorpay_payment_id=(
+                                payment.razorpay_payment_id
+                            ),
+                            razorpay_account_id=(
+                                owner.razorpay_account_id
+                            ),
+                            amount=payment.amount,
+                        )
+                    )
+
+                except Exception as exc:
+                    transfer_error = str(exc)
+
+            else:
+                transfer_error = (
+                    "Venue owner does not have "
+                    "a Razorpay linked account."
+                )
+
+        else:
+            transfer_error = (
+                "Venue owner could not be found."
+            )
 
         self.send_confirmation_email(booking)
 
+        response_data = {
+            "message": (
+                "Payment verified and booking "
+                "confirmed successfully."
+            ),
+            "booking_id":
+                str(booking.booking_id),
+            "booking_status":
+                booking.status,
+            "payment_status":
+                payment.status,
+            "owner_transfer_processed":
+                transfer_result is not None,
+        }
+
+        if transfer_result is not None:
+            response_data["owner_transfer"] = (
+                transfer_result
+            )
+
+        if transfer_error:
+            response_data["owner_transfer_error"] = (
+                transfer_error
+            )
+
         return Response(
-            {
-                "message": (
-                    "Payment verified and booking "
-                    "confirmed successfully."
-                ),
-                "booking_id":
-                    str(booking.booking_id),
-                "booking_status":
-                    booking.status,
-                "payment_status":
-                    payment.status,
-            },
+            response_data,
             status=status.HTTP_200_OK,
         )
 
@@ -540,7 +664,10 @@ class RefundPaymentView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        result = self.process_refund(booking)
+        result = self.process_refund(
+            booking,
+            request=request,
+        )
 
         return Response(
             result["data"],
@@ -548,7 +675,10 @@ class RefundPaymentView(APIView):
         )
 
     @staticmethod
-    def process_refund(booking):
+    def process_refund(
+        booking,
+        request=None,
+    ):
 
         payment = Payment.objects.select_for_update().filter(
             booking=booking,
@@ -654,15 +784,28 @@ class RefundPaymentView(APIView):
 
         payment.refund_id = refund["id"]
         payment.status = "REFUNDED"
+
         payment.save()
 
         booking.payment_status = "REFUNDED"
+
         booking.save(
             update_fields=[
                 "payment_status",
                 "updated_at",
             ]
         )
+
+        if request is not None:
+            create_audit_log(
+                request,
+                "PAYMENT_REFUND",
+                (
+                    f"Payment of ₹{payment.amount} was "
+                    f"refunded for booking "
+                    f"{booking.booking_id}."
+                ),
+            )
 
         return {
             "status": status.HTTP_200_OK,

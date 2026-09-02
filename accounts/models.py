@@ -2,7 +2,7 @@ from django.db import models
 from django.contrib.auth.models import User
 from django.utils import timezone
 
-# Create your models here.
+
 class Customer(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     name = models.CharField(max_length=100)
@@ -14,7 +14,8 @@ class Customer(models.Model):
 
     def __str__(self):
         return self.name
-    
+
+
 class VenueOwner(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     name = models.CharField(max_length=100)
@@ -24,7 +25,25 @@ class VenueOwner(models.Model):
     address_line_2 = models.CharField(max_length=100, blank=True, null=True)
     bank_details = models.TextField()
     is_verified = models.BooleanField(default=False)
-    
+
+    # Razorpay Route
+    razorpay_account_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+    )
+
+    razorpay_stakeholder_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+    )
+
+    razorpay_product_id = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+    )
+
     def __str__(self):
         return self.name
-
