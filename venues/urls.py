@@ -16,6 +16,7 @@ from .views import (
     CheckAvailabilityView,
     AvailableSlotsView,
 )
+from venues.views.list_venue_view import VenueListView
 urlpatterns = [
     path(
         "",
@@ -104,4 +105,5 @@ path(
     AvailableSlotsView.as_view(),
     name="available-slots",
 ),
+path("", VenueListView.as_view(), name="venue-list"),
 ]

@@ -1,13 +1,15 @@
 from datetime import datetime, timedelta
+from decimal import Decimal
 
 from django.core.mail import send_mail
 from django.db import transaction
+from django.shortcuts import get_object_or_404
 from django.utils import timezone
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, BasePermission
 
 from payments.views import RefundPaymentView
 
@@ -23,8 +25,18 @@ from maintenance.services import (
 
 from audit.services import create_audit_log
 
-from .models import Booking
+from accounts.models import VenueOwner
 
+from .models import (
+    Booking,
+    PaidService,
+    BookingService,
+)
+
+
+# ============================================================
+# CREATE BOOKING
+# ============================================================
 
 class CreateBookingView(APIView):
 
@@ -219,6 +231,135 @@ class CreateBookingView(APIView):
             )
 
         # ---------------------------------------------
+        # PAID SERVICES
+        # ---------------------------------------------
+
+        selected_services = request.data.get(
+            "services",
+            []
+        )
+
+        if selected_services is None:
+            selected_services = []
+
+        if not isinstance(selected_services, list):
+            return Response(
+                {
+                    "message":
+                        "services must be a list."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service_objects = []
+        service_total = Decimal("0")
+        seen_service_ids = set()
+
+        for item in selected_services:
+
+            if not isinstance(item, dict):
+                return Response(
+                    {
+                        "message": (
+                            "Each service must contain "
+                            "service_id and quantity."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            service_id = item.get("service_id")
+            quantity = item.get("quantity")
+
+            if not service_id:
+                return Response(
+                    {
+                        "message":
+                            "service_id is required."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            try:
+                service_id = int(service_id)
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        "message":
+                            "Invalid service_id."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if service_id in seen_service_ids:
+                return Response(
+                    {
+                        "message": (
+                            f"Service {service_id} "
+                            "was selected more than once."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            seen_service_ids.add(service_id)
+
+            try:
+                quantity = int(quantity)
+            except (TypeError, ValueError):
+                return Response(
+                    {
+                        "message": (
+                            f"Invalid quantity for "
+                            f"service {service_id}."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if quantity <= 0:
+                return Response(
+                    {
+                        "message":
+                            "Service quantity must be greater than 0."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            service = PaidService.objects.filter(
+                id=service_id,
+                venue=venue,
+                is_active=True,
+            ).first()
+
+            if service is None:
+                return Response(
+                    {
+                        "message": (
+                            f"Service {service_id} is not "
+                            "available for this venue."
+                        )
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            line_total = (
+                service.price
+                * Decimal(quantity)
+            )
+
+            service_total += line_total
+
+            service_objects.append(
+                {
+                    "service": service,
+                    "quantity": quantity,
+                    "unit_price": service.price,
+                    "total_price": line_total,
+                }
+            )
+
+        # ---------------------------------------------
         # SAME USER OVERLAPPING BOOKING
         # ---------------------------------------------
 
@@ -249,6 +390,23 @@ class CreateBookingView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # ---------------------------------------------
+        # VENUE PRICE
+        # ---------------------------------------------
+
+        venue_total = (
+            venue.price_per_hour
+            * (
+                Decimal(duration_minutes)
+                / Decimal("60")
+            )
+        )
+
+        total_amount = (
+            venue_total
+            + service_total
+        )
 
         # ---------------------------------------------
         # CONFLICT + FCFS QUEUE
@@ -282,6 +440,13 @@ class CreateBookingView(APIView):
                 status="WAITING",
                 queue_position=waiting_count + 1,
                 payment_status="PENDING",
+                total_amount=total_amount,
+            )
+
+            # Save selected services even while waiting.
+            self.save_booking_services(
+                booking,
+                service_objects,
             )
 
             create_audit_log(
@@ -307,6 +472,12 @@ class CreateBookingView(APIView):
                         booking.status,
                     "queue_position":
                         booking.queue_position,
+                    "total_amount":
+                        booking.total_amount,
+                    "services":
+                        self.get_booking_services_data(
+                            booking
+                        ),
                 },
                 status=status.HTTP_201_CREATED,
             )
@@ -320,11 +491,6 @@ class CreateBookingView(APIView):
             + timedelta(minutes=5)
         )
 
-        total_amount = (
-            venue.price_per_hour
-            * (duration_minutes / 60)
-        )
-
         booking = Booking.objects.create(
             user=request.user,
             venue=venue,
@@ -336,6 +502,12 @@ class CreateBookingView(APIView):
             hold_expires_at=hold_expires,
             payment_status="PENDING",
             total_amount=total_amount,
+        )
+
+        # Save selected paid services.
+        self.save_booking_services(
+            booking,
+            service_objects,
         )
 
         create_audit_log(
@@ -363,11 +535,74 @@ class CreateBookingView(APIView):
                     booking.queue_position,
                 "hold_expires_at":
                     booking.hold_expires_at,
+                "venue_amount":
+                    venue_total,
+                "services_amount":
+                    service_total,
                 "total_amount":
                     booking.total_amount,
+                "services":
+                    self.get_booking_services_data(
+                        booking
+                    ),
             },
             status=status.HTTP_201_CREATED,
         )
+
+    # =============================================
+    # SAVE BOOKING SERVICES
+    # =============================================
+
+    def save_booking_services(
+        self,
+        booking,
+        service_objects,
+    ):
+
+        for selected in service_objects:
+
+            service = selected["service"]
+
+            BookingService.objects.create(
+                booking=booking,
+                service=service,
+                service_name=service.name,
+                unit_price=selected["unit_price"],
+                quantity=selected["quantity"],
+                total_price=selected["total_price"],
+            )
+
+    # =============================================
+    # BOOKING SERVICES RESPONSE
+    # =============================================
+
+    def get_booking_services_data(
+        self,
+        booking,
+    ):
+
+        services = []
+
+        for selected in booking.selected_services.all():
+
+            services.append(
+                {
+                    "id":
+                        selected.service.id
+                        if selected.service
+                        else None,
+                    "name":
+                        selected.service_name,
+                    "unit_price":
+                        str(selected.unit_price),
+                    "quantity":
+                        selected.quantity,
+                    "total_price":
+                        str(selected.total_price),
+                }
+            )
+
+        return services
 
     # =============================================
     # AVAILABILITY
@@ -655,6 +890,10 @@ class CreateBookingView(APIView):
             position += 1
 
 
+# ============================================================
+# CONFIRM BOOKING
+# ============================================================
+
 class ConfirmBookingView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -674,6 +913,10 @@ class ConfirmBookingView(APIView):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+
+# ============================================================
+# CANCEL BOOKING
+# ============================================================
 
 class CancelBookingView(APIView):
 
@@ -884,6 +1127,10 @@ class CancelBookingView(APIView):
         )
 
 
+# ============================================================
+# PROCESS EXPIRED BOOKINGS
+# ============================================================
+
 class ProcessExpiredBookingsView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -983,6 +1230,10 @@ class ProcessExpiredBookingsView(APIView):
         )
 
 
+# ============================================================
+# BOOKING DETAIL
+# ============================================================
+
 class BookingDetailView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -998,6 +1249,27 @@ class BookingDetailView(APIView):
             return Response(
                 {"message": "Booking not found."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        services = []
+
+        for selected in booking.selected_services.all():
+
+            services.append(
+                {
+                    "id":
+                        selected.service.id
+                        if selected.service
+                        else None,
+                    "name":
+                        selected.service_name,
+                    "unit_price":
+                        str(selected.unit_price),
+                    "quantity":
+                        selected.quantity,
+                    "total_price":
+                        str(selected.total_price),
+                }
             )
 
         return Response(
@@ -1024,6 +1296,8 @@ class BookingDetailView(APIView):
                     booking.payment_status,
                 "total_amount":
                     booking.total_amount,
+                "services":
+                    services,
                 "created_at":
                     booking.created_at,
                 "updated_at":
@@ -1033,6 +1307,10 @@ class BookingDetailView(APIView):
         )
 
 
+# ============================================================
+# MY BOOKINGS
+# ============================================================
+
 class MyBookingsView(APIView):
 
     permission_classes = [IsAuthenticated]
@@ -1041,6 +1319,8 @@ class MyBookingsView(APIView):
 
         bookings = Booking.objects.filter(
             user=request.user
+        ).prefetch_related(
+            "selected_services"
         ).order_by(
             "-created_at"
         )
@@ -1048,6 +1328,27 @@ class MyBookingsView(APIView):
         data = []
 
         for booking in bookings:
+
+            services = []
+
+            for selected in booking.selected_services.all():
+
+                services.append(
+                    {
+                        "id":
+                            selected.service.id
+                            if selected.service
+                            else None,
+                        "name":
+                            selected.service_name,
+                        "unit_price":
+                            str(selected.unit_price),
+                        "quantity":
+                            selected.quantity,
+                        "total_price":
+                            str(selected.total_price),
+                    }
+                )
 
             data.append(
                 {
@@ -1073,6 +1374,8 @@ class MyBookingsView(APIView):
                         booking.payment_status,
                     "total_amount":
                         booking.total_amount,
+                    "services":
+                        services,
                     "created_at":
                         booking.created_at,
                     "updated_at":
@@ -1082,5 +1385,429 @@ class MyBookingsView(APIView):
 
         return Response(
             data,
+            status=status.HTTP_200_OK,
+        )
+
+
+# ============================================================
+# OWNER PERMISSION
+# ============================================================
+
+class IsVenueOwnerUser(BasePermission):
+
+    def has_permission(self, request, view):
+
+        return (
+            request.user.is_authenticated
+            and VenueOwner.objects.filter(
+                user=request.user
+            ).exists()
+        )
+
+
+# ============================================================
+# CUSTOMER - VIEW VENUE SERVICES
+# ============================================================
+
+class VenuePaidServiceListView(APIView):
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, venue_id):
+
+        venue = Venue.objects.filter(
+            id=venue_id
+        ).first()
+
+        if venue is None:
+            return Response(
+                {
+                    "message":
+                        "Venue not found."
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        services = PaidService.objects.filter(
+            venue=venue,
+            is_active=True,
+        ).order_by(
+            "name"
+        )
+
+        data = []
+
+        for service in services:
+
+            data.append(
+                {
+                    "id":
+                        service.id,
+                    "venue":
+                        service.venue_id,
+                    "name":
+                        service.name,
+                    "description":
+                        service.description,
+                    "price":
+                        str(service.price),
+                    "is_active":
+                        service.is_active,
+                }
+            )
+
+        return Response(
+            {
+                "venue_id":
+                    venue.id,
+                "venue_name":
+                    venue.venue_name,
+                "services":
+                    data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# ============================================================
+# OWNER - LIST / CREATE SERVICES
+# ============================================================
+
+class OwnerPaidServiceListCreateView(APIView):
+
+    permission_classes = [IsVenueOwnerUser]
+
+    def get(self, request):
+
+        owner = VenueOwner.objects.get(
+            user=request.user
+        )
+
+        services = PaidService.objects.filter(
+            venue__venue_owner=owner
+        ).select_related(
+            "venue"
+        ).order_by(
+            "venue__venue_name",
+            "name",
+        )
+
+        data = []
+
+        for service in services:
+
+            data.append(
+                {
+                    "id":
+                        service.id,
+                    "venue":
+                        service.venue_id,
+                    "venue_name":
+                        service.venue.venue_name,
+                    "name":
+                        service.name,
+                    "description":
+                        service.description,
+                    "price":
+                        str(service.price),
+                    "is_active":
+                        service.is_active,
+                }
+            )
+
+        return Response(
+            data,
+            status=status.HTTP_200_OK,
+        )
+
+    def post(self, request):
+
+        owner = VenueOwner.objects.get(
+            user=request.user
+        )
+
+        venue_id = request.data.get(
+            "venue"
+        )
+
+        name = request.data.get(
+            "name"
+        )
+
+        description = request.data.get(
+            "description",
+            "",
+        )
+
+        price = request.data.get(
+            "price"
+        )
+
+        if not venue_id:
+            return Response(
+                {
+                    "message":
+                        "Venue is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not name:
+            return Response(
+                {
+                    "message":
+                        "Service name is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if price is None:
+            return Response(
+                {
+                    "message":
+                        "Service price is required."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            price = Decimal(
+                str(price)
+            )
+        except Exception:
+            return Response(
+                {
+                    "message":
+                        "Invalid service price."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if price < 0:
+            return Response(
+                {
+                    "message":
+                        "Service price cannot be negative."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        venue = get_object_or_404(
+            Venue,
+            id=venue_id,
+            venue_owner=owner,
+        )
+
+        service = PaidService.objects.create(
+            venue=venue,
+            name=name,
+            description=description,
+            price=price,
+            is_active=True,
+        )
+
+        create_audit_log(
+            request,
+            "CREATE",
+            (
+                f"Paid service '{service.name}' "
+                f"created for venue "
+                f"'{venue.venue_name}'."
+            ),
+        )
+
+        return Response(
+            {
+                "message":
+                    "Paid service created successfully.",
+                "service":
+                    {
+                        "id":
+                            service.id,
+                        "venue":
+                            venue.id,
+                        "name":
+                            service.name,
+                        "description":
+                            service.description,
+                        "price":
+                            str(service.price),
+                        "is_active":
+                            service.is_active,
+                    },
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+# ============================================================
+# OWNER - UPDATE / DELETE SERVICE
+# ============================================================
+
+class OwnerPaidServiceDetailView(APIView):
+
+    permission_classes = [IsVenueOwnerUser]
+
+    def patch(self, request, service_id):
+
+        owner = VenueOwner.objects.get(
+            user=request.user
+        )
+
+        service = get_object_or_404(
+            PaidService,
+            id=service_id,
+            venue__venue_owner=owner,
+        )
+
+        if "name" in request.data:
+
+            name = request.data.get(
+                "name"
+            )
+
+            if not name:
+                return Response(
+                    {
+                        "message":
+                            "Service name cannot be empty."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            service.name = name
+
+        if "description" in request.data:
+
+            service.description = request.data.get(
+                "description",
+                "",
+            )
+
+        if "price" in request.data:
+
+            try:
+                price = Decimal(
+                    str(
+                        request.data.get(
+                            "price"
+                        )
+                    )
+                )
+            except Exception:
+                return Response(
+                    {
+                        "message":
+                            "Invalid service price."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if price < 0:
+                return Response(
+                    {
+                        "message":
+                            "Service price cannot be negative."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            service.price = price
+
+        if "is_active" in request.data:
+
+            value = request.data.get(
+                "is_active"
+            )
+
+            if isinstance(value, bool):
+                service.is_active = value
+
+            elif str(value).lower() == "true":
+                service.is_active = True
+
+            elif str(value).lower() == "false":
+                service.is_active = False
+
+            else:
+                return Response(
+                    {
+                        "message":
+                            "is_active must be true or false."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        service.save()
+
+        create_audit_log(
+            request,
+            "UPDATE",
+            (
+                f"Paid service '{service.name}' "
+                f"updated."
+            ),
+        )
+
+        return Response(
+            {
+                "message":
+                    "Paid service updated successfully.",
+                "service":
+                    {
+                        "id":
+                            service.id,
+                        "venue":
+                            service.venue_id,
+                        "name":
+                            service.name,
+                        "description":
+                            service.description,
+                        "price":
+                            str(service.price),
+                        "is_active":
+                            service.is_active,
+                    },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, service_id):
+
+        owner = VenueOwner.objects.get(
+            user=request.user
+        )
+
+        service = get_object_or_404(
+            PaidService,
+            id=service_id,
+            venue__venue_owner=owner,
+        )
+
+        # Deactivate instead of physically deleting.
+        # Existing bookings retain their price snapshot.
+        service.is_active = False
+
+        service.save(
+            update_fields=[
+                "is_active",
+                "updated_at",
+            ]
+        )
+
+        create_audit_log(
+            request,
+            "DELETE",
+            (
+                f"Paid service '{service.name}' "
+                f"was deactivated."
+            ),
+        )
+
+        return Response(
+            {
+                "message":
+                    "Paid service deactivated successfully."
+            },
             status=status.HTTP_200_OK,
         )

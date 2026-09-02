@@ -7,6 +7,9 @@ from .views import (
     ProcessExpiredBookingsView,
     BookingDetailView,
     MyBookingsView,
+    VenuePaidServiceListView,
+    OwnerPaidServiceListCreateView,
+    OwnerPaidServiceDetailView,
 )
 
 
@@ -47,4 +50,21 @@ urlpatterns = [
         ProcessExpiredBookingsView.as_view(),
         name="process-expired-bookings",
     ),
+    path(
+    "venues/<int:venue_id>/services/",
+    VenuePaidServiceListView.as_view(),
+    name="venue-paid-services",
+),
+
+path(
+    "services/",
+    OwnerPaidServiceListCreateView.as_view(),
+    name="owner-paid-services",
+),
+
+path(
+    "services/<int:service_id>/",
+    OwnerPaidServiceDetailView.as_view(),
+    name="owner-paid-service-detail",
+),
 ]
